@@ -24,8 +24,14 @@ bool usb_pd_snk_queue_frame(const uint8_t *frame, uint8_t len);
 /* Called from IRQ on IF_TX_END to continue with any pending auto reply; returns true if a frame was started. */
 bool usb_pd_snk_on_tx_end_handle_pending(void);
 
-/* Set/Get selected PD Specification Revision for outgoings: 2 or 3 */
+/* Set/Get selected PD Specification Revision for outgoings: 1, 2 or 3 */
 void usb_pd_snk_set_spec_rev(uint8_t rev);
 uint8_t usb_pd_snk_get_spec_rev(void);
-/* Return header SpecRev bits mask to OR into byte0: 0x40 for PD2.0, 0x80 for PD3.0 */
+/* Return header SpecRev bits mask to OR into byte0 */
 uint8_t usb_pd_snk_get_spec_flag(void);
+
+/* Busy-wait until TX engine and pending queue are idle (timeout in ms, 0 disables waiting). */
+bool usb_pd_snk_wait_for_idle(uint32_t timeout_ms);
+
+/* Send a standalone PD1.0 GoodCRC control message; blocks until completion. */
+bool usb_pd_snk_send_goodcrc_pd10_blocking(void);

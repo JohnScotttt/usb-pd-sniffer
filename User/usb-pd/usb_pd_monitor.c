@@ -7,6 +7,7 @@
 #include "usb_pd_message.h"
 #include "usb_pd_snk.h"
 #include "usb_pd_auto.h"
+#include "usb_pd_benchmark.h"
 
 /* PD RX Buuffer */
 __attribute__((aligned(4))) static uint8_t usb_pd_rx_buffer[PD_MSG_MAX_LEN];
@@ -54,6 +55,7 @@ void usb_pd_monitor_process(void) {
     /* flush any deferred SNK prints in non-ISR context */
     usb_pd_snk_poll();
     usb_pd_auto_poll();
+    usb_pd_benchmark_poll();
 
     // 从 buffer 读取并处理 PD 消息
     pd_msg_buffer_t *msg_buffer = get_message_buffer();
@@ -114,6 +116,7 @@ void USBPD_IRQHandler(void) {
 
                     /* After scheduling GoodCRC, evaluate auto-replies and queue them */
                     usb_pd_auto_on_rx(status, rx, byte_cnt);
+                    usb_pd_benchmark_on_rx(status, rx, byte_cnt);
                 }
             }
             save_message(status, usb_pd_rx_buffer, byte_cnt);

@@ -2,10 +2,12 @@
 
 #include "ch32x035_usbpd.h"
 #include "debug.h"
+#include "millis.h"
 #include "usb_cdc_print.h"
 #include "usb_pd_cc.h"
 #include "usb_pd_message.h"
 #include "usb_pd_auto.h"
+#include "usb_pd_benchmark.h"
 
 static volatile bool s_snk_active = false;
 static uint8_t s_tx_buf[34] __attribute__((aligned(4)));
@@ -14,7 +16,18 @@ static bool s_rdo_sent_once = false; /* avoid duplicate REQUEST on repeated SRC_
 static volatile uint8_t s_deferred_msgs = 0; /* bit0: enter msg, bit1: exit msg, bit2: RDO sent msg */
 static uint8_t s_pending_frame[34];
 static uint8_t s_pending_len = 0;
-static volatile uint8_t s_spec_rev = 2; /* 2 for PD2.0, 3 for PD3.0; default PD2.0 */
+static volatile uint8_t s_spec_rev = 2; /* 1:PD1.0, 2:PD2.0, 3:PD3.0; default PD2.0 */
+
+static inline uint8_t pd_spec_bits_from_rev(uint8_t rev) {
+    switch (rev) {
+    case 3:
+        return 0x80u;
+    case 1:
+        return 0x00u;
+    default:
+        return 0x40u;
+    }
+}
 
 /* Select currently configured CC line */
 static inline void pd_set_cc_drive_enable(bool en) {
@@ -64,7 +77,7 @@ static void pd_force_header_portrole_sink(uint8_t *frame /*>=2 bytes*/) {
 }
 
 /* Send a complete PD frame (header+payload without CRC). MessageID will be managed. */
-static bool pd_send_frame_patch_header(const uint8_t *frame, uint8_t len) {
+static bool pd_send_frame_patch_header_bits(const uint8_t *frame, uint8_t len, uint8_t spec_bits) {
     if (len < 2 || len > 34) {
         cdc_acm_printf("! invalid PD length:%u\n", len);
         return false;
@@ -74,7 +87,7 @@ static bool pd_send_frame_patch_header(const uint8_t *frame, uint8_t len) {
     for (uint8_t i = 0; i < len; ++i) s_tx_buf[i] = frame[i];
     pd_force_header_portrole_sink(s_tx_buf);
     /* enforce SpecRev to selected */
-    s_tx_buf[0] = (uint8_t)((s_tx_buf[0] & ~0xC0u) | (s_spec_rev == 3 ? 0x80u : 0x40u));
+    s_tx_buf[0] = (uint8_t)((s_tx_buf[0] & ~0xC0u) | (spec_bits & 0xC0u));
     s_tx_buf[1] = (s_tx_buf[1] & ~0x0Eu) | (s_tx_msg_id & 0x0Eu);
 
     /* Log our own TX message into the message buffer for CDC printing */
@@ -90,6 +103,10 @@ static bool pd_send_frame_patch_header(const uint8_t *frame, uint8_t len) {
     s_tx_msg_id = (uint8_t)((s_tx_msg_id + 2) & 0x0Eu);
 
     return true;
+}
+
+static bool pd_send_frame_patch_header(const uint8_t *frame, uint8_t len) {
+    return pd_send_frame_patch_header_bits(frame, len, pd_spec_bits_from_rev(s_spec_rev));
 }
 
 void usb_pd_snk_enter(void) {
@@ -118,6 +135,7 @@ void usb_pd_snk_exit(void) {
 
     /* Reset auto-reply/EPR state */
     usb_pd_auto_reset();
+    usb_pd_benchmark_abort();
 
     /* Drop any buffered messages/backlog on exit */
     clear_message_buffer();
@@ -241,7 +259,36 @@ void usb_pd_snk_poll(void) {
 }
 
 void usb_pd_snk_set_spec_rev(uint8_t rev) {
-    if (rev == 3) s_spec_rev = 3; else s_spec_rev = 2;
+    if (rev >= 3) {
+        s_spec_rev = 3;
+    } else if (rev <= 1) {
+        s_spec_rev = 1;
+    } else {
+        s_spec_rev = 2;
+    }
 }
 uint8_t usb_pd_snk_get_spec_rev(void) { return s_spec_rev; }
-uint8_t usb_pd_snk_get_spec_flag(void) { return (s_spec_rev == 3 ? 0x80u : 0x40u); }
+uint8_t usb_pd_snk_get_spec_flag(void) { return pd_spec_bits_from_rev(s_spec_rev); }
+
+bool usb_pd_snk_wait_for_idle(uint32_t timeout_ms) {
+    if (!s_snk_active) return false;
+    uint32_t start = millis();
+    while ((USBPD->CONTROL & PD_TX_EN) != 0 || s_pending_len != 0) {
+        if (timeout_ms == 0) {
+            return false;
+        }
+        if ((int32_t)(millis() - start) >= (int32_t)timeout_ms) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool usb_pd_snk_send_goodcrc_pd10_blocking(void) {
+    if (!s_snk_active) return false;
+    uint8_t frame[2] = { CTRL_GOODCRC, 0x00 };
+    if (!pd_send_frame_patch_header_bits(frame, sizeof(frame), pd_spec_bits_from_rev(1))) {
+        return false;
+    }
+    return usb_pd_snk_wait_for_idle(10);
+}

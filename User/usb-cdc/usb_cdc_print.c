@@ -3,8 +3,11 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <string.h>
+
 #include "usb_cdc_print.h"
 #include "usb_pd_snk.h"
+#include "usb_pd_benchmark.h"
 
 /*!< endpoint address */
 #define CDC_IN_EP  0x81
@@ -88,6 +91,165 @@ USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t write_buffer[256];
 
 volatile bool ep_tx_busy_flag = false;
 
+static inline bool ascii_is_space(char c) {
+    return (c == ' ') || (c == '\t') || (c == '\r') || (c == '\n');
+}
+
+static inline char ascii_tolower_char(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c + 32);
+    }
+    return c;
+}
+
+static bool starts_with_keyword(const char *buf, size_t len, const char *keyword) {
+    size_t kw_len = strlen(keyword);
+    if (len < kw_len) {
+        return false;
+    }
+    for (size_t i = 0; i < kw_len; ++i) {
+        if (ascii_tolower_char(buf[i]) != keyword[i]) {
+            return false;
+        }
+    }
+    if (len == kw_len) {
+        return true;
+    }
+    char tail = buf[kw_len];
+    return ascii_is_space(tail) || tail == '\0';
+}
+
+static inline bool ascii_is_digit(char c) {
+    return (c >= '0') && (c <= '9');
+}
+
+static void skip_spaces(const char **cursor) {
+    while (**cursor && ascii_is_space(**cursor)) {
+        (*cursor)++;
+    }
+}
+
+static bool parse_decimal_u32(const char *start, uint32_t *value, const char **endptr) {
+    uint32_t result = 0;
+    const char *p = start;
+    bool has_digit = false;
+    while (*p && ascii_is_digit(*p)) {
+        has_digit = true;
+        uint8_t digit = (uint8_t)(*p - '0');
+        if (result > (UINT32_MAX - digit) / 10U) {
+            return false;
+        }
+        result = result * 10U + digit;
+        ++p;
+    }
+    if (!has_digit) {
+        return false;
+    }
+    if (value) *value = result;
+    if (endptr) *endptr = p;
+    return true;
+}
+
+static bool parse_interval_ms_to_us(const char *start, uint32_t *interval_us, const char **endptr) {
+    const char *p = start;
+    uint32_t int_part = 0;
+    bool has_int = false;
+    while (*p && ascii_is_digit(*p)) {
+        has_int = true;
+        uint8_t digit = (uint8_t)(*p - '0');
+        if (int_part > (USB_PD_BENCH_MAX_INTERVAL_US / 1000U)) {
+            return false;
+        }
+        int_part = int_part * 10U + digit;
+        ++p;
+    }
+
+    uint32_t frac_numer = 0;
+    uint32_t frac_denom = 1U;
+    uint8_t frac_digits = 0;
+    if (*p == '.') {
+        ++p;
+        while (*p && ascii_is_digit(*p)) {
+            if (frac_digits < 3) {
+                frac_numer = frac_numer * 10U + (uint8_t)(*p - '0');
+                frac_denom *= 10U;
+                ++frac_digits;
+            }
+            ++p;
+        }
+    }
+
+    if (!has_int && frac_digits == 0) {
+        return false;
+    }
+
+    uint32_t total_us = int_part * 1000U;
+    if (frac_digits > 0) {
+        uint32_t frac_us = (frac_numer * 1000U) / frac_denom;
+        if (total_us > USB_PD_BENCH_MAX_INTERVAL_US - frac_us) {
+            return false;
+        }
+        total_us += frac_us;
+    }
+
+    if (total_us == 0) {
+        return false;
+    }
+
+    if (interval_us) *interval_us = total_us;
+    if (endptr) *endptr = p;
+    return true;
+}
+
+static bool cdc_handle_benchmark_command(const uint8_t *buf, uint32_t len) {
+    if (len < 9) {
+        return false;
+    }
+
+    char line[CDC_MAX_MPS + 1];
+    uint32_t copy_len = len;
+    if (copy_len >= sizeof(line)) {
+        copy_len = sizeof(line) - 1;
+    }
+    memcpy(line, buf, copy_len);
+    line[copy_len] = '\0';
+
+    size_t line_len = strlen(line);
+    if (!starts_with_keyword(line, line_len, "benchmark")) {
+        return false;
+    }
+
+    const char *cursor = line + 9; /* strlen("benchmark") */
+    skip_spaces(&cursor);
+    if (*cursor == '\0') {
+        cdc_acm_prints("# benchmark: usage benchmark <interval_ms> <count>\n");
+        return true;
+    }
+
+    uint32_t interval_us = 0;
+    if (!parse_interval_ms_to_us(cursor, &interval_us, &cursor)) {
+        cdc_acm_prints("# benchmark: invalid interval\n");
+        return true;
+    }
+
+    skip_spaces(&cursor);
+    if (*cursor == '\0') {
+        cdc_acm_prints("# benchmark: missing count\n");
+        return true;
+    }
+
+    uint32_t requested = 0;
+    if (!parse_decimal_u32(cursor, &requested, &cursor)) {
+        cdc_acm_prints("# benchmark: invalid count\n");
+        return true;
+    }
+
+    if (!usb_pd_benchmark_start(interval_us, requested)) {
+        cdc_acm_prints("# benchmark: busy or out-of-range\n");
+    }
+    return true;
+}
+
 void usb_dc_low_level_init(void) {
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBFS, ENABLE);
@@ -159,8 +321,9 @@ void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes) {
                 usb_pd_snk_on_cdc_bytes(read_buffer, (uint8_t)nbytes);
             }
         } else {
-            /* In LISTEN mode: accept ASCII command "snk2"/"snk3" or plain "snk" */
-            if ((nbytes >= 4) &&
+            if (cdc_handle_benchmark_command(read_buffer, nbytes)) {
+                /* handled */
+            } else if ((nbytes >= 4) &&
                 (read_buffer[0] == 's' || read_buffer[0] == 'S') &&
                 (read_buffer[1] == 'n' || read_buffer[1] == 'N') &&
                 (read_buffer[2] == 'k' || read_buffer[2] == 'K') &&

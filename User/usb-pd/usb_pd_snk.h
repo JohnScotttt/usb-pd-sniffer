@@ -33,5 +33,7 @@ uint8_t usb_pd_snk_get_spec_flag(void);
 /* Busy-wait until TX engine and pending queue are idle (timeout in ms, 0 disables waiting). */
 bool usb_pd_snk_wait_for_idle(uint32_t timeout_ms);
 
+/* Send a standalone PD1.0 GoodCRC control message (non-blocking). */
+bool usb_pd_snk_send_goodcrc_pd10(void);
 /* Send a standalone PD1.0 GoodCRC control message; blocks until completion. */
 bool usb_pd_snk_send_goodcrc_pd10_blocking(void);

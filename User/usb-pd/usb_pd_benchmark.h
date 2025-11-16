@@ -15,5 +15,8 @@ void usb_pd_benchmark_on_rx(uint32_t status, const uint8_t *data, uint8_t len);
 /* Service deferred logs and run the actual GoodCRC burst once everything is ready. */
 void usb_pd_benchmark_poll(void);
 
+/* Called from USBPD TX_END ISR when the transmitter becomes idle. */
+void usb_pd_benchmark_on_tx_idle(void);
+
 /* Cancel any pending benchmark state (e.g., when SNK exits manually). */
 void usb_pd_benchmark_abort(void);

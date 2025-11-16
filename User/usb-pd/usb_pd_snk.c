@@ -77,7 +77,7 @@ static void pd_force_header_portrole_sink(uint8_t *frame /*>=2 bytes*/) {
 }
 
 /* Send a complete PD frame (header+payload without CRC). MessageID will be managed. */
-static bool pd_send_frame_patch_header_bits(const uint8_t *frame, uint8_t len, uint8_t spec_bits) {
+static bool pd_send_frame_patch_header_bits_ex(const uint8_t *frame, uint8_t len, uint8_t spec_bits, bool log_tx) {
     if (len < 2 || len > 34) {
         cdc_acm_printf("! invalid PD length:%u\n", len);
         return false;
@@ -90,8 +90,10 @@ static bool pd_send_frame_patch_header_bits(const uint8_t *frame, uint8_t len, u
     s_tx_buf[0] = (uint8_t)((s_tx_buf[0] & ~0xC0u) | (spec_bits & 0xC0u));
     s_tx_buf[1] = (s_tx_buf[1] & ~0x0Eu) | (s_tx_msg_id & 0x0Eu);
 
-    /* Log our own TX message into the message buffer for CDC printing */
-    save_message(PD_RX_SOP0, s_tx_buf, len);
+    if (log_tx) {
+        /* Log our own TX message into the message buffer for CDC printing */
+        save_message(PD_RX_SOP0, s_tx_buf, len);
+    }
 
     /* Enable TX_END interrupt to catch completion then switch to RX in ISR */
     USBPD->CONFIG |= IE_TX_END;
@@ -103,6 +105,10 @@ static bool pd_send_frame_patch_header_bits(const uint8_t *frame, uint8_t len, u
     s_tx_msg_id = (uint8_t)((s_tx_msg_id + 2) & 0x0Eu);
 
     return true;
+}
+
+static bool pd_send_frame_patch_header_bits(const uint8_t *frame, uint8_t len, uint8_t spec_bits) {
+    return pd_send_frame_patch_header_bits_ex(frame, len, spec_bits, true);
 }
 
 static bool pd_send_frame_patch_header(const uint8_t *frame, uint8_t len) {
@@ -284,10 +290,14 @@ bool usb_pd_snk_wait_for_idle(uint32_t timeout_ms) {
     return true;
 }
 
-bool usb_pd_snk_send_goodcrc_pd10_blocking(void) {
+bool usb_pd_snk_send_goodcrc_pd10(void) {
     if (!s_snk_active) return false;
     uint8_t frame[2] = { CTRL_GOODCRC, 0x00 };
-    if (!pd_send_frame_patch_header_bits(frame, sizeof(frame), pd_spec_bits_from_rev(1))) {
+    return pd_send_frame_patch_header_bits_ex(frame, sizeof(frame), pd_spec_bits_from_rev(1), false);
+}
+
+bool usb_pd_snk_send_goodcrc_pd10_blocking(void) {
+    if (!usb_pd_snk_send_goodcrc_pd10()) {
         return false;
     }
     return usb_pd_snk_wait_for_idle(10);

@@ -131,6 +131,7 @@ void USBPD_IRQHandler(void) {
     }
 
     if (status & IF_TX_END) {
+        bool handled = false;
         /* TX complete (e.g., GoodCRC or a data/control frame) */
         USBPD->STATUS |= IF_TX_END;
 
@@ -142,13 +143,16 @@ void USBPD_IRQHandler(void) {
         }
 
         /* If a pending auto-reply exists, start it immediately; otherwise, release CC drive and return to RX */
-        if (!usb_pd_snk_on_tx_end_handle_pending()) {
+        handled = usb_pd_snk_on_tx_end_handle_pending();
+        if (!handled) {
             USBPD->PORT_CC1 &= ~CC_LVE;
             USBPD->PORT_CC2 &= ~CC_LVE;
             USBPD->CONTROL &= ~PD_TX_EN;
             USBPD->DMA = (uint32_t)(uint8_t *)usb_pd_rx_buffer;
             USBPD->BMC_CLK_CNT = UPD_TMR_RX_48M;
             USBPD->CONTROL |= BMC_START;
+
+            usb_pd_benchmark_on_tx_idle();
         }
     }
 
